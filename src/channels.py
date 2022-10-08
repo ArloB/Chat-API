@@ -1,23 +1,32 @@
 '''
 Channels functions
 '''
-from db import db
+from db import get_db
 from error import InputError
 from helper_functions import get_u_id, token_validation
+
+db = get_db()
 
 def channels_list(token):
     '''
     Returns a dictionary of channels and details that the user is part of
     '''
 
-    channels = {'channels': []}
+    dict = {'channels': []}
     u_id = get_u_id(token)
+    
+    with db.cursor() as cur:
+        cur.execute("select c.id, c.name from channels c, channel_users cu where cu.user_id = %s and c.id = cu.channel_id", [u_id])
 
-    for num in db['channels']:
-        if u_id in db['channels'][num]['all_members']:
-           channels['channels'].append({'channel_id': db['channels'][num]['channel_id'], 'name':  db['channels'][num]['name']})
+        channels = cur.fetchall()
 
-    return channels
+        for channel in channels:
+            dict['channels'].append({
+                'channel_id': channel[0],
+                'name': channel[1]
+            })
+        
+    return dict
 
 def channels_listall(token):
     '''
@@ -29,8 +38,14 @@ def channels_listall(token):
     if not token_validation(token):
         return channels
 
-    for num in db['channels']:
-        channels['channels'].append({'channel_id': db['channels'][num]['channel_id'], 'name':  db['channels'][num]['name']})
+    with db.cursor() as cur:
+        cur.execute("select id, name from channels")
+
+        for channel in cur.fetchall():
+            channels['channels'].append({
+                'channel_id': channel[0],
+                'name': channel[1]
+            })
 
     return channels
 
@@ -43,18 +58,20 @@ def channels_create(token, name, is_public):
 
     is_public = is_public == 'True' or is_public
 
+    user_id = get_u_id(token)
+
     if len(name) > 20:
         raise InputError
 
-    channel_id = 0
-    u_id = get_u_id(token)
+    with db.cursor() as cur:
+        cur.execute(""" insert into channels (public, name)
+                        values (%s, %s)
+                        returning id""", [is_public, name])
+        
+        channel_id = cur.fetchone()[0]
+        
+        cur.execute("insert into channel_users (user_id, channel_id, admin) values (%s, %s, %s)", [user_id, channel_id, True])
 
-    while channel_id in db['channels']:
-        channel_id += 1
-
-    db['channels'][channel_id] = {'name': name, 'channel_id': channel_id, \
-    'is_public': is_public, 'owner_members': [u_id], 'all_members': [u_id], 'messages': []}
-
-    channel_dict = {'channel_id': channel_id}
+        channel_dict = {'channel_id': channel_id}
 
     return channel_dict

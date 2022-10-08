@@ -1,20 +1,24 @@
 '''Standup functions'''
+from calendar import c
 from time import time
 import threading
-from helper_functions import token_validation
+from db import get_db
+from helper_functions import get_u_id, token_validation
 from message import message_send
 from error import AccessError, InputError
-from auth import decode_token
 from user import user_profile
-from db import db
+
+db = get_db()
+
+standups = {}
 
 def __standup_finish(token, channel_id):
-    msg = db['channels'][channel_id].get('standup_msg', '').rstrip()
+    msg = standups[channel_id].get('standup_msg', '').rstrip()
+    
     if msg != '':
         message_send(token, channel_id, msg)
-    db['channels'][channel_id]['standup_active'] = False
-    db['channels'][channel_id]['standup_time'] = None
-    db['channels'][channel_id]['standup_msg'] = ''
+    
+    standups[channel_id].clear()
     
 
 def standup_start(token, channel_id, length):
@@ -22,20 +26,20 @@ def standup_start(token, channel_id, length):
     if not token_validation(token):
         raise AccessError(description="Invalid token")
     
-    if not channel_id in db['channels']:
-        raise InputError(description="Invalid Channel ID")
-
-    if db['channels'][channel_id].get('standup_active', False):
+    if not channel_id in standups:
+        standups[channel_id] = {
+            'standup_time': None,
+            'standup_msg': ''
+        }
+    else:
         raise InputError(description="Standup already active")
-
-    db['channels'][channel_id]['standup_active'] = True
 
     t = threading.Timer(length, __standup_finish, args=(token, channel_id,))
     
     fin = time() + length
     t.start()
 
-    db['channels'][channel_id]['standup_time'] = fin
+    standups[channel_id]['standup_time'] = fin
     return {'time_finish': int(fin)}
 
 
@@ -44,37 +48,44 @@ def standup_active(token, channel_id):
     if not token_validation(token):
         raise AccessError(description="Invalid token")
 
-    if not db['channels'].get(channel_id, False):
-        raise InputError(description="Invalid Channel ID")
+    active = standups.get(channel_id, False)
 
-    standup_time = db['channels'][channel_id].get('standup_time')
-    fin = int(standup_time) if standup_time is not None else standup_time
-
+    if active:
+        standup_time = standups[channel_id].get('standup_time')
+        fin = int(standup_time) if standup_time is not None else standup_time
+    else:
+        fin = None
+    
     return {
-        'is_active': db['channels'][channel_id].get('standup_active', False),
+        'is_active': active,
         'time_finish': fin
     }
 
 
 def standup_send(token, channel_id, message):
     '''Adds given message to standup queue in given channel'''
+    user_id = get_u_id(token)
+    
     if not token_validation(token):
         raise AccessError(description="Invalid token")
 
-    if not channel_id in db['channels']:
-        raise InputError(description="Invalid Channel ID")
-
-    if decode_token(token) not in db['channels'][channel_id]['all_members']:
-        raise AccessError(description="The authorised user is not a member of the channel that the message is within")
-
-    if not db['channels'][channel_id].get('standup_active', False):
+    if not channel_id in standups:
         raise InputError(description="Standup not active")
+
+    with db.cursor() as cur:
+        cur.execute("select * from channel_users where user_id = %s and channel_id = %s", [user_id, channel_id])
+        
+        if not cur.rowcount:
+            raise AccessError(description="The authorised user is not a member of the channel that the message is within")
 
     if len(message) > 1000:
         raise InputError(description="Message is more than 1000 characters")
 
-    handle = user_profile(token, decode_token(token))['user']['handle_str']
-    db['channels'][channel_id]['standup_msg'] = db['channels'][channel_id]['standup_msg'] \
-        + f"{handle}: {message}\n" if 'standup_msg' in db['channels'][channel_id] else f"{handle}: {message}\n"
+    user = user_profile(token, user_id)
+    
+    handle = user['user']['handle_str'] if user['user']['handle_str'] else user['user']['name_first']
+    
+    standups[channel_id]['standup_msg'] = standups[channel_id]['standup_msg'] \
+        + f"{handle}: {message}\n" if 'standup_msg' in standups[channel_id] else f"{handle}: {message}\n"
     
     return {}

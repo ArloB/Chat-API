@@ -1,3 +1,7 @@
+import atexit
+import psycopg2
+
+
 db = {
     'accounts': {
 
@@ -6,6 +10,27 @@ db = {
 
     }
 }
+
+con = None
+
+def connect():
+    global con
+    try:
+        con = psycopg2.connect(dbname="chat", user="user", password="pass")
+        con.set_session(autocommit=True)
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+
+def get_db():
+    if not (con):
+        connect()
+    return (con)
+
+def exit_handler():
+    if con:
+        con.close()
+        
+atexit.register(exit_handler)
 
 example_db = {
     'accounts': {

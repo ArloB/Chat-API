@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
 from error import InputError
+import psycopg2
 
 from other import *
 from auth import auth_login, auth_logout, auth_register, auth_password_reset, auth_password_reset_request
@@ -310,4 +311,6 @@ def hangman_guess_route():
     return jsonify(hangman_guess(data['letter'], data['channel_id']))
 
 if __name__ == "__main__":
-    APP.run(port=0) # Do not edit this port
+    APP.run(port=56705) # Do not edit this port
+
+    

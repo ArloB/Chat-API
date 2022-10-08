@@ -1,13 +1,14 @@
 '''Message functions'''
-import time
+from datetime import datetime
 import threading
 
 from error import InputError, AccessError
 from channels import get_u_id, token_validation
-from db import db
+from db import get_db
 
-def create_message(token, channel_id, message, time_sent):
-    '''sending a message to a channel'''
+db = get_db()
+
+def message_send(token, channel_id, message):
     if not token_validation(token):
         raise AccessError(description='Invalid Token')
 
@@ -15,56 +16,29 @@ def create_message(token, channel_id, message, time_sent):
         raise InputError(description='Message too long')
 
     u_id = get_u_id(token)
+    
+    id = -1
+    
+    with db.cursor() as cur:
+        cur.execute("select * from channels where id = %s", [channel_id])
+        
+        if not cur.rowcount:
+            raise InputError(description='Invalid Channel')
+        
+        cur.execute(""" select u.id
+                        from users u, channel_users cu 
+                        where u.id = %s and cu.user_id = u.id and cu.channel_id = %s""", [u_id, channel_id])
+                    
+        if cur.rowcount == 0:
+            raise AccessError(description='User not part of channel')
 
-    #check if channel id doesn't exist
-    if channel_id not in db['channels']:
-        raise InputError(description='Invalid Channel')
+        cur.execute('insert into messages (channel_id, user_id, message, time) values (%s, %s, %s, %s) returning id', [channel_id, u_id, message, int(datetime.now().timestamp())])
 
-    if u_id not in db['channels'][channel_id]['all_members']: #check u_id not in channel
-        raise AccessError(description='User not in channel')
-
-    # calculate message_id
-    if 'deleted_messages' not in db['channels'][channel_id]:
-        message_id = channel_id * 10000 + \
-        len(db['channels'][channel_id]['messages'])
-    else:
-        message_id = channel_id * 10000 + \
-        len(db['channels'][channel_id]['messages']) + \
-        len(db['channels'][channel_id]['deleted_messages'])
-    # create dict of message and its details
-    message_dict = {
-        'message_id': message_id,
-        'u_id': u_id,
-        'message': message,
-        'time_created': time_sent,
-        'reacts': [],
-        'is_pinned': False
-    }
-    return message_dict, message_id
-
-def store_message(channel_id, message_dict):
-    db['channels'][channel_id]['messages'].append(message_dict)
-
-def message_send(token, channel_id, message):
-    message_dict, message_id = create_message(token, channel_id, message, int(time.time()))
-    store_message(channel_id, message_dict)
+        id = cur.fetchone()[0]
 
     return {
-        'message_id': message_id,
+        'message_id': id,
     }
-
-def find_channel(message_id):
-    #returns channel_id, iterator in messages, deleted?, valid?
-    for ch in db['channels']:
-        #loop through each messages dictionary in channel
-        for i, _ in enumerate(db['channels'][ch]['messages']):
-            if message_id == db['channels'][ch]['messages'][i]['message_id']:
-                return ch, i, False, True
-        #check if message has been deleted
-        if 'deleted_messages' in db['channels'][ch]:
-            if message_id in db['channels'][ch]['deleted_messages']:
-                return ch, 0, True, False
-    return ch, 0, False, False
 
 def message_remove(token, message_id):
     '''removing a message from a channel'''
@@ -73,30 +47,23 @@ def message_remove(token, message_id):
         raise AccessError(description='Invalid Token')
 
     u_id = get_u_id(token)
-    for user in db['accounts']:
-        if u_id is db['accounts'][user]['u_id']:
-            email = db['accounts'][user]['email']
-    owner = db['accounts'][email]['is_owner']
-
-    channel, i, deleted, valid = find_channel(message_id)
-    if deleted == True:
-        raise InputError(description='Message already deleted')
-    elif valid == False:
-        raise AccessError(description="Message doesn't exist")
-    if owner or u_id in db['channels'][channel]['owner_members'] or \
-    u_id == db['channels'][channel]['messages'][i]['u_id']:
-        message_list = db['channels'][channel]['messages']
-        deleted = message_list.pop(i)
-        deleted_m_id = deleted['message_id']
-        #add deleted to deleted_messages in channels
-        if 'deleted_messages' not in db['channels'][channel]:
-            db['channels'][channel]['deleted_messages'] = []
-            db['channels'][channel]['deleted_messages'].append(deleted_m_id)
-        else:
-            db['channels'][channel]['deleted_messages'].append(deleted_m_id)
-        return {}
-
-    raise AccessError(description="Cannot delete someone else's message")
+    
+    with db.cursor() as cur:
+        cur.execute("""select cu.admin, m.user_id from messages m, channels c, channel_users cu
+                        where c.id = m.channel_id and m.id = %s and cu.channel_id = c.id
+                        and cu.user_id = %s""", [message_id, u_id])
+         
+        admin = cur.fetchone()
+        
+        if admin is None:
+            raise AccessError(description="Message doesn't exist")
+        elif not bool(admin[0]) or int(admin[1]) != int(u_id):
+            raise AccessError(description="User does not have permission")
+        
+        cur.execute("delete from messages where id = %s", [message_id])
+        cur.execute("delete from reacts where message_id = %s", [message_id])
+        
+    return {}
 
 def message_edit(token, message_id, message):
     '''editing a message in a channel'''
@@ -106,118 +73,107 @@ def message_edit(token, message_id, message):
 
     #get u_id and email from token
     u_id = get_u_id(token)
-    for user in db['accounts']:
-        if u_id is db['accounts'][user]['u_id']:
-            email = db['accounts'][user]['email']
-    owner = db['accounts'][email]['is_owner']
-    channel, i, deleted, valid = find_channel(message_id)
-    if not valid or deleted:
-        raise AccessError(description="Message doesn't exist")
-    #if flockr owner, owner member of channel or user sent the message
-    if owner or u_id in db['channels'][channel]['owner_members'] or \
-    u_id == db['channels'][channel]['messages'][i]['u_id']:
-        if message == '':
-            message_list = db['channels'][channel]['messages']
-            message_list.remove(db['channels'][channel]['messages'][i])
-        else:
-            db['channels'][channel]['messages'][i]['message'] = message
-        return {}
-
-    raise AccessError(description="Cannot edit someone else's message")
+    
+    with db.cursor() as cur:
+        cur.execute("""select cu.admin, m.user_id from messages m, channels c, channel_users cu
+                        where c.id = m.channel_id and m.id = %s and cu.channel_id = c.id
+                        and cu.user_id = %s""", [message_id, u_id])
+         
+        admin = cur.fetchone()
+        
+        if admin is None:
+            raise AccessError(description="Message doesn't exist")
+        elif not bool(admin[0]) or int(admin[1]) != int(u_id):
+            raise AccessError(description="User does not have permission")
+        
+        cur.execute("update messages set message = %s where id = %s", [message, message_id])
+        
+    return {}
 
 def message_sendlater(token, channel_id, message, time_sent):
     '''sends message to channel at later time'''
-    if time_sent < time.time():
+    if time_sent < int(datetime.now().timestamp()):
         raise InputError(description='Cannot send message to past')
-    message_dict, message_id = create_message(token, channel_id, message, time_sent)
-    x = threading.Timer(time_sent-time.time(), store_message, args=[channel_id, message_dict])
-    x.start()
-    return {
-        'message_id': message_id
-    }
+    
+    threading.Timer(time_sent-int(datetime.now().timestamp()), message_send, args=[token, channel_id, message]).start()
 
-def message_react(token, message_id, react_id):
+    return {}
+
+def message_react(token, message_id, react_id = 1):
     '''Reacting to a message in a channel'''
     if not token_validation(token): #check valid token
         raise AccessError(description='Invalid Token')
-
-    if react_id != 1: #if invalid react_id
-        raise InputError(description='Invalid react_id')
-
-    ch, i, deleted, valid = find_channel(message_id)
-    if not valid or deleted: #if message id is invalid or has been deleted
-        raise InputError(description="Message doesn't exist in channel")
-
-    u_id = get_u_id(token) #get u_id and email from token
-    #check if user is part of channel the message is in
-    if u_id in db['channels'][ch]['all_members']:
-        #if no reacts
-        reacts_list = db['channels'][ch]['messages'][i]['reacts']
-        if reacts_list == []:
-            reacts = {
-                'react_id': react_id,
-                'u_ids': [u_id],
-                'is_this_user_reacted': False
-            }
-            db['channels'][ch]['messages'][i]['reacts'].append(reacts)
-        elif u_id in reacts_list[0]['u_ids']:
+    
+    u_id = get_u_id(token)
+    
+    with db.cursor() as cur:
+        cur.execute(""" select cu.* from messages m, channels c, channel_users cu
+                        where m.id = %s and m.channel_id = c.id and cu.channeL_id = c.id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Unable to access message")
+        
+        cur.execute("select * from reacts where user_id = %s and message_id = %s and type = %s", [u_id, message_id, react_id])
+        
+        if cur.rowcount > 0:
             raise InputError(description="Already reacted to message")
-        else:
-            #append u_id to u_ids
-            db['channels'][ch]['messages'][i]['reacts'][0]['u_ids'].append(u_id)
-        return {}
-    raise InputError(description="Cannot access this channel's messages")
+        
+        cur.execute("insert into reacts (user_id, message_id, type) values (%s, %s, %s)", [u_id, message_id, react_id])
+        
+    return {}
 
 def message_unreact(token, message_id, react_id):
     #check valid token
     if not token_validation(token):
         raise AccessError(description='Invalid Token')
-    #if invalid react_id
-    if react_id != 1:
-        raise InputError(description='Invalid react_id')
-    ch, i, deleted, valid = find_channel(message_id)
-    #if message id is invalid or has been deleted
-    if not valid or deleted:
-        raise InputError(description="Message doesn't exist in channel")
-    u_id = get_u_id(token) #get u_id and email from token
-    #check if user is part of channel the message is in
-    if u_id in db['channels'][ch]['all_members']:
-        reacts_list = db['channels'][ch]['messages'][i]['reacts']
-        if reacts_list == []:
-            raise InputError(description='Message does not have a react')
-        #if user unreacted to that message, remove u_id from u_ids
-        elif u_id in reacts_list[0]['u_ids']:
-            for j, user in enumerate(reacts_list[0]['u_ids']): #loop through u_ids
-                if u_id == user:
-                    db['channels'][ch]['messages'][i]['reacts'][0]['u_ids'].pop(j)
-                    reacts_list2 = db['channels'][ch]['messages'][i]['reacts']
-                    if len(reacts_list2[0]['u_ids']) == 0: #delete reacts dictionary
-                        db['channels'][ch]['messages'][i]['reacts'] = []
-            return {}
-        else:
-            raise InputError(description='Did not react to this message')
-    raise InputError(description="Cannot access this channel's messages")
+    
+    u_id = get_u_id(token)
+    
+    with db.cursor() as cur:
+        cur.execute(""" select cu.* from messages m, channels c, channel_users cu
+                        where m.id = %s and m.channel_id = c.id and cu.channeL_id = c.id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Unable to access message")
+        
+        cur.execute("select * from reacts where user_id = %s and message_id = %s and type = %s", [u_id, message_id, react_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Could not find react")
+        
+        cur.execute("delete from reacts where user_id = %s and message_id = %s and type = %s", [u_id, message_id, react_id])
+            
+    return {}
 
 def message_pin(token, message_id):
     '''pins a message in channel'''
-    #check if token is valid
     if not token_validation(token):
         raise AccessError
 
-    #get u_id and email from token
     u_id = get_u_id(token)
-    ch, i, deleted, valid = find_channel(message_id)
-    if not valid or deleted:
-        raise InputError(description="Message doesn't exist in channel")
-    if u_id in db['channels'][ch]['owner_members']:
-        if db['channels'][ch]['messages'][i]['is_pinned']:
-            #message already pinned
+    
+    with db.cursor() as cur:
+        cur.execute(""" select cu.* from messages m, channels c, channel_users cu
+                        where m.id = %s and m.channel_id = c.id and cu.channeL_id = c.id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Unable to access message")
+        
+        cur.execute(""" select m.pinned, cu.admin from messages m, channel_users cu
+                        where m.id = %s and cu.channel_id = m.channel_id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Message doesn't exist in channel")    
+
+        vals = cur.fetchone()
+        
+        if bool(vals[0]):
             raise InputError(description='Message is already pinned')
-        else:
-            db['channels'][ch]['messages'][i]['is_pinned'] = True
-    else:
-        #user is not an owner
-        raise AccessError(description='Cannot pin if you are not an owner')
+        
+        if not bool(vals[1]):
+            raise AccessError(description='Cannot pin if you are not an owner')
+        
+        cur.execute("update messages set pinned = true where id = %s", [message_id])
 
     return {}
 
@@ -227,19 +183,29 @@ def message_unpin(token, message_id):
     if not token_validation(token):
         raise AccessError
 
-    #get u_id and email from token
     u_id = get_u_id(token)
-    ch, i, deleted, valid = find_channel(message_id)
-    if not valid or deleted:
-        raise InputError(description="Message doesn't exist in channel")
-    if u_id in db['channels'][ch]['owner_members']:
-        if db['channels'][ch]['messages'][i]['is_pinned']:
-            db['channels'][ch]['messages'][i]['is_pinned'] = False
-        else:
-            #message already unpinned
-            raise InputError(description='Message is already unpinned')
-    else:
-        #user is not an owner
-        raise AccessError(description='Cannot unpin if you are not an owner')
+    
+    with db.cursor() as cur:
+        cur.execute(""" select cu.* from messages m, channels c, channel_users cu
+                        where m.id = %s and m.channel_id = c.id and cu.channeL_id = c.id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Unable to access message")
+        
+        cur.execute(""" select m.pinned, cu.admin from messages m, channel_users cu
+                        where m.id = %s and cu.channel_id = m.channel_id and cu.user_id = %s""", [message_id, u_id])
+        
+        if cur.rowcount == 0:
+            raise InputError(description="Message doesn't exist in channel")    
+
+        vals = cur.fetchone()
+        
+        if not bool(vals[0]):
+            raise InputError(description='Message is not pinned')
+        
+        if not bool(vals[1]):
+            raise AccessError(description='Cannot unpin if you are not an owner')
+        
+        cur.execute("update messages set pinned = false where id = %s", [message_id])
 
     return {}

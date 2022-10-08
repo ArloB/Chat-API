@@ -1,0 +1,7 @@
+flask
+flask-cors
+pyjwt
+pillow
+imgspy
+requests
+psycopg2

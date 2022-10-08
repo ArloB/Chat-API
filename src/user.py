@@ -2,8 +2,8 @@
 User Functions
 '''
 from error import InputError, AccessError
-from db import db
-from auth import decode_token, check_email, check_name, check_handle
+from db import get_db
+from auth import check_email, check_name, check_handle
 from helper_functions import token_validation, get_u_id
 from PIL import Image
 from flask import request
@@ -13,16 +13,7 @@ import os
 import requests
 import urllib.request
 
-def update_user_obj(token, u_id, key, value):
-    """
-    Helper Function to get user obj.
-    """
-    for account in db['accounts'].values():
-        if account['token'] == token and account['u_id'] == u_id:
-            account[key] = value
-            break
-    else:
-        raise AccessError(description="Account not found")
+db = get_db()
 
 def user_profile(token, u_id):
     """
@@ -30,59 +21,85 @@ def user_profile(token, u_id):
     """
     if not token_validation(token):
         raise AccessError(description="Invalid Token")
-
-    for account in db['accounts'].values():
-        if account['u_id'] == u_id:
-            return {
-                'user': {
-                    'u_id': account['u_id'],
-                    'email': account['email'],
-                    'name_first': account['name_first'],
-                    'name_last': account['name_last'],
-                    'handle_str': account['handle_str'],
-                    'profile_img_url': account['profile_img_url'] if account['profile_img_url'] is not None else "",
-                }
+    
+    with db.cursor() as cur:
+        cur.execute("select * from users where id = %s", [u_id])
+        
+        if cur.rowcount == 0:
+            raise AccessError(description=f"Account not found.")
+        
+        user = cur.fetchone()
+        
+        return {
+            'user': {
+                'u_id': user[0],
+                'email': user[1],
+                'name_first': user[3],
+                'name_last': user[4],
+                'handle_str': user[5],
+                'profile_img_url': user[6],
             }
-    raise AccessError(description=f"Account not found.")
+        }
+    
 
 def user_profile_setname(token, name_first, name_last):
     """
     Set f/l name of user
     """
-
-    u_id = decode_token(token)
+    if not token_validation(token):
+        raise AccessError(description="Invalid Token")
+    
+    u_id = get_u_id(token)
+    
     if not check_name(name_first):
         raise InputError(description="Invalid First Name")
+    
     if not check_name(name_last):
         raise InputError(description="Invalid Last Name")
-    update_user_obj(token, u_id, 'name_first', name_first)
-    update_user_obj(token, u_id, 'name_last', name_last)
+    
+    with db.cursor() as cur:
+        cur.execute("update users set first_name = %s, last_name = %s where id = %s", [name_first, name_last, u_id])
+    
     return {}
 
 def user_profile_setemail(token, email):
     """
     Set email of user
     """
-
-    u_id = decode_token(token)
+    if not token_validation(token):
+        raise AccessError(description="Invalid Token")
+    
+    u_id = get_u_id(token)
+    
     if not check_email(email):
         raise InputError(description="Invalid Email.")
-    update_user_obj(token, u_id, 'email', email)
+    
+    with db.cursor() as cur:
+        cur.execute("update users set email = %s where id = %s", [email, u_id])
+    
     return {}
 
 def user_profile_sethandle(token, handle_str):
     """
     Set handle of user
     """
-
-    u_id = decode_token(token)
+    if not token_validation(token):
+        raise AccessError(description="Invalid Token")
+    
+    u_id = get_u_id(token)
+    
     if not check_handle(handle_str):
         raise InputError(description="Invalid Handle.")
-    update_user_obj(token, u_id, 'handle_str', handle_str)
+    
+    with db.cursor() as cur:
+        cur.execute("update users set handle = %s where id = %s", [handle_str, u_id])
+        
     return {}
 
 def user_upload_photo(token, img_url, x_start, y_start, x_end, y_end):
-
+    if not token_validation(token):
+        raise AccessError(description="Invalid Token")
+    
     if x_start >= x_end or y_start >= y_end:
         raise InputError(description= 'Crop dimensions are invalid')
 
@@ -124,6 +141,8 @@ def user_upload_photo(token, img_url, x_start, y_start, x_end, y_end):
     cropped.save(img_path)
 
     url = request.url_root + '/user_account_imgs' + f"/{u_id}.jpg"
-    update_user_obj(token, u_id, 'profile_img_url', url)
+    
+    with db.cursor() as cur:
+        cur.execute("update users set profile_img = %s where id = %s", [url, u_id])
     
     return {}

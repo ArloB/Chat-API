@@ -1,5 +1,7 @@
 # Chat-API
 
+Uses postgres
+
 ### Interface
 
 |Function Name|HTTP Method|Parameters|Return type|Exceptions|Description|
